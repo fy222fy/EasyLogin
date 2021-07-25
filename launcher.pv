@@ -1,0 +1,135 @@
+set traceDisplay = long.
+set ignoreTypes = false.
+
+(********************************************************************)
+(*                                  AES Symmetric encryption     		                         	            *)
+(********************************************************************)
+type key.
+type Senc_alg.
+const WeakSenc:Senc_alg[private].
+
+fun senc(PWD,key):bitstring.
+reduc forall m: PWD, k:key; sdec(senc(m,k),k) = m.
+
+(********************************************************************)
+(*                                           Hash Functions.   					                        *)
+(********************************************************************)
+
+fun hash(bitstring): bitstring.
+
+(********************************************************************)
+(*                                           Asymmetric encryption   					                        *)
+(********************************************************************)
+
+type skey .
+type pkey . 
+fun pk (skey) : pkey .
+fun aenc (key , pkey ) : bitstring.
+reduc forall m: key , k:skey; adec(aenc(m,pk(k)),k)  = m.
+
+(********************************************************************)
+(*                                      Signature function                                                *)
+(********************************************************************)
+type spkey.
+type sskey.
+
+fun spk(sskey):spkey.
+fun sign(bitstring, sskey): bitstring.
+reduc forall m: bitstring, ssk: sskey; checksign(sign(m,ssk),spk(ssk)) = m.
+reduc forall m: bitstring, ssk: sskey; getmess(sign(m,ssk)) = m.
+
+free c:channel.
+fun ANBindReq(Userid):msg.
+free NSBindReq(Userid):msg.
+free SNBindResp(Deviceid,pkey):msg.
+free NABindResp(Deviceid,pkey):msg.
+free ANBindOK(bitstring):msg.
+free NSBindOK(bitstring):msg.
+
+fun ANEncReq(Userid,PWD):msg.
+free NSEncReq(Userid,PWD):msg.
+free SNEncResp(bitstring,bitstring):msg.
+free NAEncResp(bitstring,bitstring):msg.
+
+fun ANDecReq(bitstring):msg.
+free NSDecReq(bitstring):msg.
+free SNDecResp(PWD,bitstring):msg.
+free NADecResp(PWD,bitstring):msg.
+
+free ok:bitstring.
+free debug:bitstring[private].
+
+table appSchipDB(Deviceid,pkey).
+table appPWDDB(Userid,key).
+
+
+let app(ch_AN:channel,userid:Userid,pwd:PWD)=
+(
+    out(ch_AN,ANBindReq(userid));
+    in(ch_AN,NABindResp(deviceid,pub));
+    insert appSchipDB(deviceid,pub);
+    out(ch_AN,ANBindOK(ok));
+)|
+(
+    get appSchipDB(deviceid,pub) in
+    let pwd_aenc = aenc(pwd,pub) in
+    out(ch_AN,ANEncReq(pwd_aenc));
+    in(ch_AN,NAEncResp(enc_txt,s));
+    if s = checksign(enc_txt,pub) then
+        insert appPWDDB(enc_txt)
+)|
+(
+    get appSchipDB(deviceid,pub) in
+    get appPWDDB(enc_txt)
+    let pub_encode_txt = aenc((userid,enc_txt),pub) in
+    out(ch_AN,ANDecReq(pub_encode_txt));
+    in(ch_AN,NADecResp(xpwd,s));
+    if xpwd = checksign(s,pub) then
+        if xpwd = pwd then
+            evnet success_decode();
+)
+
+let nfcchip(ch_NA:channel,ch_NS:channel)=
+(
+    in(ch_NA,ANBindReq(userid));
+    out(ch_NS,NSBindReq(userid));
+    in(ch_NS,SNBindResp(deviceid,pub));
+    out(ch_NA,NABindResp(deviceid,pub));
+    in(ch_NA,ANBindOK(ok));
+    out(ch_NS,NSBindOK(ok));
+)|
+(
+    in(ch_NA,ANEncReq(pwd_aenc));
+    out(ch_NS,NSEncReq(pwd_aencu));
+    in(ch_NS,SNEncResp(enc_txt,s));
+    out(ch_NA,NAEncResp(enc_txt,s));
+)|
+(
+    in(ch_NA,ANDecReq(pub_encode_txt));
+    out(ch_NS,NSDecReq(pub_encode_txt));
+    in(ch_NS,SNDecResp(pwd,s));
+    out(ch_NA,NADecResp(pwd,s));
+)
+
+let securechip(ch_SN:channel)=
+(
+    in(ch_SN,NSBindReq(userid));
+    new priv:skey;
+    let pub = pk(priv) in
+    out(ch_SN,SNBindResp(deviceid,pub));
+    in(ch_SN,NSBindOK(ok));
+    new aes_key:key;
+    insert SchipDB(userid,aes_key,priv);
+)|
+(
+    in(ch_SN,NSEncReq(pwd_aenc));
+    let (userid:bitstring,pwd:PWD) = adec(pwd_aenc,priv) in    
+    get SchipDB(=userid,aes_key,priv);
+    let enc_txt = senc(pwd,aes_key) in
+    out(ch_SN,SNEncResp(enc_txt));
+)|
+(
+    in(ch_SN,NSDecReq(pub_encode_txt));
+    let (userid:bitstring,enc_txt:bitstring) = adec(pub_encode_txt,priv) in
+    get SchipDB(=userid,aes_key,priv)
+)

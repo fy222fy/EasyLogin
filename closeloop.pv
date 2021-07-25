@@ -1,0 +1,143 @@
+set traceDisplay = long.
+set ignoreTypes = false.
+query u:Uname,d:Domain; inj-event(success_login(u))==>inj-event(beign_login(u,d)).
+(*query event(debug_test).*)
+type msg.
+type Uname.
+type PWD.
+type Appid.
+type UUID.
+type URL.
+type Qrcode.
+type Domain.
+type Token.
+type Cookie.
+
+event showQrcode(Qrcode).
+event beign_login(Uname,Domain).
+event success_login(Uname).
+event debug_test().
+
+fun gen_Qr(UUID):Qrcode.
+
+(********************************************************************)
+(*                                  AES Symmetric encryption     		                         	            *)
+(********************************************************************)
+type key.
+type Senc_alg.
+const WeakSenc:Senc_alg[private].
+
+fun senc(PWD,key):bitstring.
+reduc forall m: PWD, k:key; sdec(senc(m,k),k) = m.
+
+(********************************************************************)
+(*                                           Hash Functions.   					                        *)
+(********************************************************************)
+
+fun hash(bitstring): bitstring.
+
+(********************************************************************)
+(*                                           Asymmetric encryption   					                        *)
+(********************************************************************)
+
+type skey .
+type pkey . 
+fun pk (skey) : pkey .
+fun aenc (key , pkey ) : bitstring.
+reduc forall m: key , k:skey; adec(aenc(m,pk(k)),k)  = m.
+
+(********************************************************************)
+(*                                      Signature function                                                *)
+(********************************************************************)
+type spkey.
+type sskey.
+
+fun spk(sskey):spkey.
+fun sign(bitstring, sskey): bitstring.
+reduc forall m: bitstring, ssk: sskey; checksign(sign(m,ssk),spk(ssk)) = m.
+reduc forall m: bitstring, ssk: sskey; getmess(sign(m,ssk)) = m.
+
+free c:channel.
+free debug:bitstring[private].
+
+(* msg format *)
+fun COrequest(Appid,URL):msg[data].
+fun OCresponse(Qrcode,UUID):msg[data].
+fun CAsend(UUID):msg[data].
+fun AOrequest(UUID):msg[data].
+fun OAresponse(URL,Domain,pkey):msg[data].
+fun AOsend(Uname,bitstring,bitstring,UUID):msg[data].
+fun OSrequest(Uname,bitstring,bitstring,UUID):msg[data].
+fun SOresponse(Token,Cookie):msg[data].
+fun COpoll(UUID):msg[data].
+fun OCsend(Token,Cookie):msg[data].
+fun CSlogin(Token,Cookie):msg[data].
+
+let client(ch_CO:channel,ch_CA:channel,ch_CS:channel,appid:Appid, url:URL,redirecturl:URL) =
+(
+    out(ch_CO, COrequest(appid,url));
+    in(ch_CO,OCresponse(qrcode:Qrcode,uuid:UUID));
+    event showQrcode(qrcode);
+    out(ch_CA,CAsend(uuid));
+    out(ch_CO,COpoll(uuid));
+    in(ch_CO,OCsend(token,cookie));
+    out(ch_CS,CSlogin(token,cookie))
+).
+
+let open(ch_OC:channel,ch_OA:channel,ch_OS:channel,appid:Appid, loginurl:URL, url:URL, pub:pkey,domain:Domain) =
+(
+    in(ch_OC,COrequest(=appid,=url));
+    new uuid:UUID;
+    let qrcode = gen_Qr(uuid) in
+    out(ch_OC,OCresponse(qrcode,uuid));
+    in(ch_OA,AOrequest(=uuid));
+    out(ch_OA,OAresponse(url,domain,pub));
+    in(ch_OA,AOsend(uname,spwd,saes,uuid));
+    out(ch_OS,OSrequest(uname,spwd,saes,uuid));
+    in(ch_OS,SOresponse(token,cookie));
+    in(ch_OC,COpoll(=uuid));
+    out(ch_OC,OCsend(token,cookie))
+).
+
+let app(ch_AC:channel,ch_AO:channel,ch_AS:channel,uname:Uname,pwd:PWD) =
+(
+    in(ch_AC,CAsend(uuid));
+    out(ch_AO,AOrequest(uuid));
+    in(ch_AO,OAresponse(url,domain,pub));
+    event beign_login(uname,domain);
+    new aes_key:key;
+    let spwd = senc(pwd,aes_key) in
+    let saes = aenc(aes_key,pub) in
+    out(ch_AO,AOsend(uname,spwd,saes,uuid))
+).
+
+let server(ch_SO:channel,ch_SC:channel,pri:skey,uname_T:Uname,pwd_T:PWD) =
+(
+    in(ch_SO,OSrequest(uname,spwd,saes,uuid));
+    let aes_key = adec(saes,pri) in
+    let pwd = sdec(spwd,aes_key) in
+    if uname = uname_T then
+    if pwd = pwd_T then
+    new token:Token;
+    new cookie:Cookie;
+    out(ch_SO,SOresponse(token,cookie));
+    in(ch_SC,CSlogin(=token,=cookie));
+    event debug_test();
+    event success_login(uname)
+).
+
+process
+    new ch_CO:channel; new ch_CA:channel; new ch_OA:channel; new ch_OS:channel; new ch_CS:channel; new ch_AS:channel;
+    new pri:skey; let pub = pk(pri) in
+    new uname:Uname; new pwd:PWD; new appid:Appid; new redirecturl:URL; new loginurl:URL; new url:URL; new domain:Domain;
+    out(c,(uname,appid,redirecturl,loginurl,url,domain,pub,ch_CA));
+    (
+        client(ch_CO,ch_CA,ch_CS,appid,url,redirecturl)|
+        open(ch_CO,ch_OA,ch_OS,appid,loginurl,url,pub,domain)|
+        app(ch_CA,ch_OA,ch_AS,uname,pwd)|
+        server(ch_OS,ch_CS,pri,uname,pwd)|
+        open(c,ch_OA,ch_OS,appid,loginurl,url,pub,domain)|
+        open(ch_CO,c,ch_OS,appid,loginurl,url,pub,domain)|
+        server(c,ch_CS,pri,uname,pwd)|
+        server(ch_OS,c,pri,uname,pwd)
+    )
